@@ -1,0 +1,23 @@
+{
+  "item.cj_fabric.colt45": "Colt 45",
+  "item.cj_fabric.desert_eagle": "Desert Eagle",
+  "item.cj_fabric.chromegun": "Shotgun",
+  "item.cj_fabric.micro_uzi": "Micro SMG",
+  "item.cj_fabric.ak47": "AK-47",
+  "item.cj_fabric.m4": "M4",
+  "item.cj_fabric.minigun": "Minigun",
+  "item.cj_fabric.rocket_launcher": "Rocket Launcher",
+  "item.cj_fabric.baseball_bat": "Baseball Bat",
+  "item.cj_fabric.jetpack": "Jetpack",
+  "item.cj_fabric.skateboard": "Skateboard",
+  "item.cj_fabric.ammo1": "Light Ammo",
+  "item.cj_fabric.ammo2": "Heavy Ammo",
+  "item.cj_fabric.ammo3": "Rocket Ammo",
+  "key.cj_fabric.crouch": "Crouch (stealth)",
+  "key.cj_fabric.vehicle": "Get in or out of the car",
+  "key.cj_fabric.radio_previous": "Previous radio station",
+  "key.cj_fabric.radio_next": "Next radio station",
+  "key.cj_fabric.headlights": "Car headlights",
+  "key.cj_fabric.info": "Show or hide the CJ bridge information",
+  "key.categories.cj_fabric": "CJ"
+}

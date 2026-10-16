@@ -1,0 +1,569 @@
+diff --git a/crates/skate-game/src/app.rs b/crates/skate-game/src/app.rs
+index 900ce5f..6b1e320 100644
+--- a/crates/skate-game/src/app.rs
++++ b/crates/skate-game/src/app.rs
+@@ -56,6 +56,7 @@ pub(crate) fn build(
+     physics: GamePhysics,
+     skater: SkaterRuntime,
+ ) -> App {
++    let host_address = config.host;
+     let retail_scene = config.map.as_ref().is_some_and(|map| crate::retail_render::RetailScene::for_map(map));
+     let mut app = App::new();
+     crate::custom_models::register_source(&mut app);
+@@ -143,6 +144,12 @@ pub(crate) fn build(
+     crate::teleport_menu::install(&mut app);
+     app.add_plugins(crate::updater::UpdaterPlugin);
+     app.add_plugins(crate::multiplayer::MultiplayerPlugin);
++    if let Some(address) = host_address {
++        match crate::host::HostLink::bind(address) {
++            Ok(link) => { app.insert_resource(link).add_plugins(crate::host::HostPlugin); }
++            Err(error) => { eprintln!("{error}"); std::process::exit(1); }
++        }
++    }
+     app.add_plugins(crate::scoring_hud::ScoringHudPlugin);
+     app.add_plugins(crate::debug_cam::DebugCamPlugin);
+     app.add_plugins(crate::water_splash::WaterSplashPlugin);
+diff --git a/crates/skate-game/src/config.rs b/crates/skate-game/src/config.rs
+index 983d218..3fe0869 100644
+--- a/crates/skate-game/src/config.rs
++++ b/crates/skate-game/src/config.rs
+@@ -17,6 +17,8 @@ pub(crate) struct Config {
+     pub teleport: Option<String>,
+     /// `--mute`: no game or mod audio (game_audio).
+     pub mute: bool,
++    /// `--host ADDR`: another program drives the skater over UDP (see host).
++    pub host: Option<std::net::SocketAddr>,
+ }
+ 
+ impl Config {
+@@ -34,6 +36,7 @@ impl Config {
+             map_fingerprint: 0,
+             teleport: None,
+             mute: false,
++            host: None,
+         };
+         let mut difficulty_override = None;
+         let mut explicit_map = false;
+@@ -80,6 +83,7 @@ impl Config {
+                 Some("--validate-maps") => { config.validate_maps = true; explicit_map = true; }
+                 Some("--start-paused") => config.start_paused = true,
+                 Some("--mute") => config.mute = true,
++                Some("--host") => config.host = Some(args.next().ok_or("--host requires an address like 127.0.0.1:34600")?.to_string_lossy().parse().map_err(|_| "Invalid --host address")?),
+                 Some("--teleport") => config.teleport = Some(args.next().ok_or("--teleport requires a destination ID")?.to_string_lossy().into_owned()),
+                 Some("--difficulty") => {
+                     let value = args.next().ok_or("--difficulty requires easy, normal, hardcore, motorized or custom")?;
+@@ -94,7 +98,7 @@ impl Config {
+                 }
+                 _ => {
+                     return Err(format!(
+-                        "Unknown argument {arg:?}. Usage: skate3rust [--assets DIRECTORY] [--map MAP.skate | --test-world] [--difficulty easy|normal|hardcore|motorized|custom] [--verify CAPTURE.png] [--check-assets | --validate-maps] [--start-paused] [--mute]"
++                        "Unknown argument {arg:?}. Usage: skate3rust [--assets DIRECTORY] [--map MAP.skate | --test-world] [--difficulty easy|normal|hardcore|motorized|custom] [--verify CAPTURE.png] [--check-assets | --validate-maps] [--start-paused] [--mute] [--host ADDR]"
+                     ));
+                 }
+             }
+diff --git a/crates/skate-game/src/game_audio/content.rs b/crates/skate-game/src/game_audio/content.rs
+index 1918633..19afcc7 100644
+--- a/crates/skate-game/src/game_audio/content.rs
++++ b/crates/skate-game/src/game_audio/content.rs
+@@ -411,7 +411,7 @@ mod tests {
+         crate::config::Config {
+             asset_root: root.to_owned(), verification_capture: None, map: None, map_path: None,
+             difficulty: Default::default(), check_assets: false, validate_maps: false, start_paused: false,
+-            multiplayer: Default::default(), map_fingerprint: 0, teleport: None, mute: true,
++            multiplayer: Default::default(), map_fingerprint: 0, teleport: None, mute: true, host: None,
+         }
+     }
+ 
+diff --git a/crates/skate-game/src/host.rs b/crates/skate-game/src/host.rs
+new file mode 100644
+index 0000000..8c6bb7b
+--- /dev/null
++++ b/crates/skate-game/src/host.rs
+@@ -0,0 +1,346 @@
++//! Host mode (`--host ADDR`): another program drives the skater over UDP and reads its pose back, one datagram each way per physics tick.
++//! The host sends the 18 gameplay actions (what a controller would give); the engine answers with the skater's bones and the board.
++//! Nothing here touches the simulation itself: the actions replace the controller's in `input::publish_actions`, and the pose is read
++//! after the physics tick has run.
++use crate::{app::SimulationSet, physics::{GamePhysics, SkaterRuntime}};
++use skate_core::math::Vector3;
++use std::collections::HashMap;
++use bevy::prelude::*;
++use skate_core::physics::board::BodyId;
++use std::net::{SocketAddr, UdpSocket};
++
++const MAGIC: u32 = 0x4838_4B53; // "SK8H" in little-endian bytes
++const VERSION: u16 = 1;
++const TYPE_INPUT: u16 = 1;
++const TYPE_POSE: u16 = 2;
++/// A region of the host's world as quads: region id, quad count, then each quad as four corners of three f32 (see `ground::world_from_quads` for the order).
++const TYPE_WORLD_SET: u16 = 3;
++const TYPE_WORLD_CLEAR: u16 = 4; // region id
++/// Put the skater (on the board) somewhere: x, y, z, heading (radians about Y), and its velocity x, y, z.
++const TYPE_TELEPORT: u16 = 5;
++/// The most quads of one region (one datagram of 48 bytes each stays under the 64 KiB of a UDP datagram).
++const MAX_QUADS: usize = 1000;
++const MAX_COORDINATE: f32 = 100_000.0;
++const ACTIONS: usize = 18;
++/// An input older than this is taken as the host having let go of everything.
++const INPUT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
++/// header (magic, version, type), sequence number, flags (none yet), and the 18 actions as f32.
++const INPUT_SIZE: usize = 8 + 4 + 4 + ACTIONS * 4;
++
++/// The socket and the last input of the host.
++#[derive(Resource)]
++pub(crate) struct HostLink {
++    socket: UdpSocket,
++    peer: Option<SocketAddr>,
++    actions: [f32; ACTIONS],
++    /// When the last input came: a host that went quiet (closed, crashed) must not leave its buttons held.
++    last_input: Option<std::time::Instant>,
++    seq: u32,
++    /// The host's world, by region; rebuilt into the collision world when something changed.
++    regions: HashMap<u32, Vec<[Vector3; 4]>>,
++    world_dirty: bool,
++    teleport: Option<([[f32; 4]; 4], [f32; 3])>,
++}
++
++impl HostLink {
++    pub(crate) fn bind(address: SocketAddr) -> Result<Self, String> {
++        let socket = UdpSocket::bind(address).map_err(|e| format!("--host {address}: {e}"))?;
++        socket.set_nonblocking(true).map_err(|e| format!("--host {address}: {e}"))?;
++        eprintln!("SKATE_HOST_READY listening on {address}");
++        Ok(Self { socket, peer: None, actions: [0.0; ACTIONS], last_input: None, seq: 0, regions: HashMap::new(), world_dirty: false, teleport: None })
++    }
++
++    /// Reads every datagram that is waiting; the newest valid input is the one that counts. Whoever sends one is the host the poses go to.
++    pub(crate) fn drain(&mut self) {
++        let mut buffer = vec![0u8; 65536];
++        while let Ok((len, from)) = self.socket.recv_from(&mut buffer) {
++            let data = &buffer[..len];
++            match kind_of(data) {
++                Some(TYPE_WORLD_SET) => {
++                    if let Some((region, quads)) = parse_world_set(data) {
++                        self.regions.insert(region, quads);
++                        self.world_dirty = true;
++                        self.adopt(from);
++                    }
++                    continue;
++                }
++                Some(TYPE_WORLD_CLEAR) => {
++                    if let Some(region) = parse_world_clear(data) {
++                        self.world_dirty |= self.regions.remove(&region).is_some();
++                    }
++                    continue;
++                }
++                Some(TYPE_TELEPORT) => {
++                    if let Some(teleport) = parse_teleport(data) {
++                        self.teleport = Some(teleport);
++                        self.adopt(from);
++                    }
++                    continue;
++                }
++                _ => {}
++            }
++            if let Some((seq, actions)) = parse_input(data) {
++                // A sequence number that went backwards (the host restarted) is taken: only the very old duplicates are dropped.
++                self.adopt(from);
++                if seq.wrapping_sub(self.seq) as i32 > 0 || self.seq == 0 {
++                    self.actions = actions;
++                    self.seq = seq;
++                }
++                self.last_input = Some(std::time::Instant::now());
++            }
++        }
++    }
++
++    /// Whoever sends is the host the poses go to; a new host (it restarted: another port) starts counting its inputs from the beginning again.
++    fn adopt(&mut self, from: SocketAddr) {
++        if self.peer != Some(from) {
++            self.peer = Some(from);
++            self.seq = 0;
++        }
++    }
++
++    pub(crate) fn actions(&self) -> [f32; ACTIONS] {
++        match self.last_input {
++            Some(at) if at.elapsed() < INPUT_TIMEOUT => self.actions,
++            _ => [0.0; ACTIONS],
++        }
++    }
++}
++
++/// The type of a datagram with a valid header, whatever its body.
++fn kind_of(data: &[u8]) -> Option<u16> {
++    if data.len() < 8
++        || u32::from_le_bytes(data[0..4].try_into().ok()?) != MAGIC
++        || u16::from_le_bytes(data[4..6].try_into().ok()?) != VERSION
++    {
++        return None;
++    }
++    Some(u16::from_le_bytes(data[6..8].try_into().ok()?))
++}
++
++fn read_f32(data: &[u8], offset: usize) -> Option<f32> {
++    let value = f32::from_le_bytes(data.get(offset..offset + 4)?.try_into().ok()?);
++    (value.is_finite() && value.abs() <= MAX_COORDINATE).then_some(value)
++}
++
++fn parse_world_set(data: &[u8]) -> Option<(u32, Vec<[Vector3; 4]>)> {
++    let region = u32::from_le_bytes(data.get(8..12)?.try_into().ok()?);
++    let count = u32::from_le_bytes(data.get(12..16)?.try_into().ok()?) as usize;
++    if count > MAX_QUADS || data.len() != 16 + count * 48 {
++        return None;
++    }
++    let mut quads = Vec::with_capacity(count);
++    for q in 0..count {
++        let mut corners = [Vector3::ZERO; 4];
++        for (c, corner) in corners.iter_mut().enumerate() {
++            let at = 16 + q * 48 + c * 12;
++            *corner = Vector3::new(read_f32(data, at)?, read_f32(data, at + 4)?, read_f32(data, at + 8)?);
++        }
++        quads.push(corners);
++    }
++    Some((region, quads)) // a quad with a broken number refuses the whole datagram: never half a region
++}
++
++fn parse_world_clear(data: &[u8]) -> Option<u32> {
++    (data.len() == 12).then(|| u32::from_le_bytes(data[8..12].try_into().unwrap()))
++}
++
++/// (the matrix `SkaterRuntime::travel` wants, the velocity)
++fn parse_teleport(data: &[u8]) -> Option<([[f32; 4]; 4], [f32; 3])> {
++    if data.len() != 8 + 7 * 4 {
++        return None;
++    }
++    let value = |i: usize| read_f32(data, 8 + i * 4);
++    let (position, heading) = (Vec3::new(value(0)?, value(1)?, value(2)?), value(3)?);
++    let velocity = [value(4)?, value(5)?, value(6)?];
++    let mut matrix = Mat4::from_rotation_translation(Quat::from_rotation_y(heading), position).to_cols_array_2d();
++    matrix[3][3] = 0.0; // as the engine's own teleports hand it over
++    Some((matrix, velocity))
++}
++
++fn parse_input(data: &[u8]) -> Option<(u32, [f32; ACTIONS])> {
++    if data.len() != INPUT_SIZE
++        || u32::from_le_bytes(data[0..4].try_into().ok()?) != MAGIC
++        || u16::from_le_bytes(data[4..6].try_into().ok()?) != VERSION
++        || u16::from_le_bytes(data[6..8].try_into().ok()?) != TYPE_INPUT
++    {
++        return None;
++    }
++    let seq = u32::from_le_bytes(data[8..12].try_into().ok()?);
++    let mut actions = [0.0f32; ACTIONS];
++    for (i, action) in actions.iter_mut().enumerate() {
++        let value = f32::from_le_bytes(data[16 + i * 4..20 + i * 4].try_into().ok()?);
++        if !value.is_finite() {
++            return None; // a broken input is dropped whole, never half taken
++        }
++        *action = value.clamp(-1.0, 1.0);
++    }
++    Some((seq, actions))
++}
++
++pub(crate) struct HostPlugin;
++impl Plugin for HostPlugin {
++    fn build(&self, app: &mut App) {
++        app.add_systems(FixedUpdate, apply_commands.in_set(SimulationSet::Controls))
++            .add_systems(FixedUpdate, send_pose.after(SimulationSet::Physics));
++    }
++}
++
++/// Before the physics tick: the teleport the host asked for, and the host's world when it changed.
++fn apply_commands(mut link: ResMut<HostLink>, mut physics: ResMut<GamePhysics>, mut skater: ResMut<SkaterRuntime>) {
++    if let Some((matrix, velocity)) = link.teleport.take() {
++        if let Err(error) = skater.travel(matrix, Some(velocity)) {
++            warn!("host teleport refused: {error}");
++        }
++    }
++    if link.world_dirty {
++        link.world_dirty = false;
++        let quads: Vec<[Vector3; 4]> = link.regions.values().flatten().copied().collect();
++        if !quads.is_empty() {
++            let started = std::time::Instant::now();
++            match physics.replace_world_with_quads(quads.clone()) {
++                Ok(()) => eprintln!("SKATE_HOST_WORLD quads={} regions={} build_ms={:.2}", quads.len(), link.regions.len(), started.elapsed().as_secs_f64() * 1000.0),
++                Err(error) => warn!("host world refused: {error}"),
++            }
++        }
++    }
++}
++
++/// After every physics tick: the skater's global bone matrices, the root and the deck of the board, to the host that last sent an input.
++fn send_pose(link: Res<HostLink>, physics: Res<GamePhysics>, skater: Res<SkaterRuntime>) {
++    let Some(peer) = link.peer else { return; };
++    if physics.failed {
++        return;
++    }
++    let bones = &skater.render_pose;
++    let mut packet = Vec::with_capacity(8 + 8 + 64 + 48 + bones.len() * 64);
++    packet.extend_from_slice(&MAGIC.to_le_bytes());
++    packet.extend_from_slice(&VERSION.to_le_bytes());
++    packet.extend_from_slice(&TYPE_POSE.to_le_bytes());
++    packet.extend_from_slice(&(physics.ticks as u32).to_le_bytes());
++    packet.extend_from_slice(&(bones.len() as u32).to_le_bytes());
++    let root = crate::animation::native_matrix(skater.animated_skeleton.roots.animation_to_world);
++    for v in root.to_cols_array() {
++        packet.extend_from_slice(&v.to_le_bytes());
++    }
++    let deck = physics.board.part_transforms()[BodyId::Deck.index()];
++    for column in deck.basis.columns {
++        for v in column {
++            packet.extend_from_slice(&v.to_le_bytes());
++        }
++    }
++    for v in [deck.translation.x, deck.translation.y, deck.translation.z] {
++        packet.extend_from_slice(&v.to_le_bytes());
++    }
++    for bone in bones {
++        for v in crate::animation::native_matrix(*bone).to_cols_array() {
++            packet.extend_from_slice(&v.to_le_bytes());
++        }
++    }
++    let _ = link.socket.send_to(&packet, peer); // a lost datagram is the next tick's problem
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn input(seq: u32, actions: [f32; ACTIONS]) -> Vec<u8> {
++        let mut data = Vec::new();
++        data.extend_from_slice(&MAGIC.to_le_bytes());
++        data.extend_from_slice(&VERSION.to_le_bytes());
++        data.extend_from_slice(&TYPE_INPUT.to_le_bytes());
++        data.extend_from_slice(&seq.to_le_bytes());
++        data.extend_from_slice(&0u32.to_le_bytes());
++        for a in actions {
++            data.extend_from_slice(&a.to_le_bytes());
++        }
++        data
++    }
++
++    #[test]
++    fn an_input_is_read_and_clamped() {
++        let mut actions = [0.0; ACTIONS];
++        actions[0] = 0.5;
++        actions[16] = 3.0;
++        let (seq, read) = parse_input(&input(7, actions)).unwrap();
++        assert_eq!(seq, 7);
++        assert_eq!(read[0], 0.5);
++        assert_eq!(read[16], 1.0);
++    }
++
++    #[test]
++    fn a_datagram_that_is_not_an_input_is_refused() {
++        let good = input(1, [0.0; ACTIONS]);
++        assert!(parse_input(&good).is_some());
++        assert!(parse_input(&good[..good.len() - 1]).is_none());
++        let mut wrong = good.clone();
++        wrong[0] ^= 1; // magic
++        assert!(parse_input(&wrong).is_none());
++        let mut wrong = good.clone();
++        wrong[6] = 2; // type
++        assert!(parse_input(&wrong).is_none());
++        let mut nan = [0.0; ACTIONS];
++        nan[5] = f32::NAN;
++        assert!(parse_input(&input(1, nan)).is_none());
++    }
++
++    fn world_set(region: u32, quads: &[[[f32; 3]; 4]]) -> Vec<u8> {
++        let mut data = Vec::new();
++        data.extend_from_slice(&MAGIC.to_le_bytes());
++        data.extend_from_slice(&VERSION.to_le_bytes());
++        data.extend_from_slice(&TYPE_WORLD_SET.to_le_bytes());
++        data.extend_from_slice(&region.to_le_bytes());
++        data.extend_from_slice(&(quads.len() as u32).to_le_bytes());
++        for quad in quads {
++            for corner in quad {
++                for v in corner {
++                    data.extend_from_slice(&v.to_le_bytes());
++                }
++            }
++        }
++        data
++    }
++
++    const FLOOR: [[f32; 3]; 4] = [[-1.0, 2.0, -1.0], [1.0, 2.0, -1.0], [1.0, 2.0, 1.0], [-1.0, 2.0, 1.0]];
++
++    #[test]
++    fn a_region_of_quads_is_read() {
++        let data = world_set(9, &[FLOOR, FLOOR]);
++        assert_eq!(kind_of(&data), Some(TYPE_WORLD_SET));
++        let (region, quads) = parse_world_set(&data).unwrap();
++        assert_eq!((region, quads.len()), (9, 2));
++        assert_eq!(quads[0][1].x, 1.0);
++    }
++
++    #[test]
++    fn a_broken_region_is_refused_whole() {
++        let good = world_set(1, &[FLOOR]);
++        assert!(parse_world_set(&good[..good.len() - 4]).is_none()); // short
++        let mut nan = good.clone();
++        nan[16..20].copy_from_slice(&f32::NAN.to_le_bytes());
++        assert!(parse_world_set(&nan).is_none());
++        let mut far = good.clone();
++        far[20..24].copy_from_slice(&1.0e9f32.to_le_bytes());
++        assert!(parse_world_set(&far).is_none());
++        let too_many = world_set(1, &vec![FLOOR; MAX_QUADS + 1]);
++        assert!(parse_world_set(&too_many).is_none());
++        assert_eq!(parse_world_set(&world_set(1, &vec![FLOOR; MAX_QUADS])).unwrap().1.len(), MAX_QUADS);
++    }
++
++    #[test]
++    fn a_teleport_makes_the_matrix_of_the_engine() {
++        let mut data = Vec::new();
++        data.extend_from_slice(&MAGIC.to_le_bytes());
++        data.extend_from_slice(&VERSION.to_le_bytes());
++        data.extend_from_slice(&TYPE_TELEPORT.to_le_bytes());
++        for v in [1.0f32, 2.0, 3.0, 0.0, 0.5, 0.0, 0.25] {
++            data.extend_from_slice(&v.to_le_bytes());
++        }
++        let (matrix, velocity) = parse_teleport(&data).unwrap();
++        assert_eq!(&matrix[3][..3], &[1.0, 2.0, 3.0]);
++        assert_eq!(matrix[3][3], 0.0);
++        assert_eq!(&matrix[2][..3], &[0.0, 0.0, 1.0]); // heading 0 faces +Z
++        assert_eq!(velocity, [0.5, 0.0, 0.25]);
++        assert!(parse_teleport(&data[..data.len() - 4]).is_none());
++    }
++}
+diff --git a/crates/skate-game/src/input.rs b/crates/skate-game/src/input.rs
+index 3c072f7..413dfce 100644
+--- a/crates/skate-game/src/input.rs
++++ b/crates/skate-game/src/input.rs
+@@ -139,6 +139,7 @@ pub(crate) fn publish_actions(
+     debug: Res<crate::debug_cam::DebugCam>,
+     camera: Res<crate::camera::CameraRuntime>,
+     mods: Option<Res<crate::modding::Mods>>,
++    mut host: Option<ResMut<crate::host::HostLink>>,
+ ) {
+     let blocked = !crate::graphics_menu::gameplay_active(menu) || debug.suppress_gameplay(&camera);
+     if blocked {
+@@ -147,8 +148,15 @@ pub(crate) fn publish_actions(
+     input.publish_actions();
+     let tick = input.tick_input();
+     let mut values=*tick.actions().values();
++    let mut available=tick.controller_available();
++    if let Some(host) = host.as_deref_mut() {
++        // Host mode (--host): the program on the other end of the socket is the controller.
++        host.drain();
++        values = host.actions();
++        available = true;
++    }
+     if !blocked { crate::modding::override_actions(mods.as_deref(), &mut values); }
+-    let tick=TickInput::new(tick.tick(),skate_core::input::gameplay_map::GameplayActions::from_values(values),tick.controller_available());
++    let tick=TickInput::new(tick.tick(),skate_core::input::gameplay_map::GameplayActions::from_values(values),available);
+     published.0 = if debug.suppress_gameplay(&camera) {
+         TickInput::new(
+             tick.tick(),
+diff --git a/crates/skate-game/src/main.rs b/crates/skate-game/src/main.rs
+index 54f4bd2..2ab34ae 100644
+--- a/crates/skate-game/src/main.rs
++++ b/crates/skate-game/src/main.rs
+@@ -1,3 +1,4 @@
++mod host;
+ mod frame_timing;
+ mod animation;
+ mod crash_report;
+diff --git a/crates/skate-game/src/physics.rs b/crates/skate-game/src/physics.rs
+index 7f5a8e7..4c4df9f 100644
+--- a/crates/skate-game/src/physics.rs
++++ b/crates/skate-game/src/physics.rs
+@@ -232,6 +232,14 @@ impl GamePhysics {
+ 
+     pub(crate) fn world_triangles(&self) -> &[skate_core::physics::board_world::WorldTriangle] { self.world.triangles() }
+ 
++    /// Host mode: the collision world becomes these quads (an area of a host's world), replacing what was there.
++    pub(crate) fn replace_world_with_quads(&mut self, quads: Vec<[Vector3; 4]>) -> Result<(), String> {
++        let world = ground::world_from_quads(self.settings.floor_material, quads)?;
++        self.offboard_grab_scene = offboard::grab_scene::Registry::new(&world, Vec::new(), Vec::new())?;
++        self.world = world;
++        Ok(())
++    }
++
+     pub(crate) fn set_external_queries(&mut self, queries: Option<std::sync::Arc<dyn skate_core::physics::board_world::ExternalQueries>>) {
+         self.world.set_external_queries(queries);
+     }
+diff --git a/crates/skate-game/src/physics/ground.rs b/crates/skate-game/src/physics/ground.rs
+index 998dfe9..fd1033a 100644
+--- a/crates/skate-game/src/physics/ground.rs
++++ b/crates/skate-game/src/physics/ground.rs
+@@ -169,6 +169,15 @@ pub(crate) fn flat_world(material: RetailContactMaterial) -> BoardWorld {
+     build_world(material, flat_surfaces(), Vec::new())
+ }
+ 
++/// Host mode: the collision world made of the quads a host sends (a Minecraft area). A quad lists its corners so that the triangles (0, 2, 1) and (0, 3, 2)
++/// face outwards: (x0, z0), (x1, z0), (x1, z1), (x0, z1) with x1 > x0 and z1 > z0, at one height, is a floor whose solid side is below.
++pub(crate) fn world_from_quads(material: RetailContactMaterial, quads: Vec<[Vector3; 4]>) -> Result<BoardWorld, String> {
++    if quads.is_empty() {
++        return Err("a world needs at least one quad".into());
++    }
++    Ok(build_world(material, [quads, vec![], vec![], vec![]], Vec::new()))
++}
++
+ fn build_world(
+     material: RetailContactMaterial,
+     surfaces: [Vec<[Vector3; 4]>; 4],
+@@ -271,3 +280,37 @@ pub(super) fn query_settings() -> (WorldContactSettings, ContactRetentionSetting
+ #[cfg(test)]
+ #[path = "tests/flat_ground.rs"]
+ mod flat_tests;
++
++#[cfg(test)]
++mod host_world_tests {
++    use super::*;
++
++    fn material() -> RetailContactMaterial {
++        RetailContactMaterial { static_friction: 0.0, dynamic_friction: 0.0, restitution: 1.0 }
++    }
++
++    fn hit(world: &BoardWorld, from: Vector3, to: Vector3) -> Option<skate_core::physics::board_world::WorldLineHit> {
++        world.query_swept_line(from, to, 0.0).unwrap()
++    }
++
++    #[test]
++    fn a_floor_quad_in_the_documented_order_is_solid_from_above() {
++        let v = Vector3::new;
++        let world = world_from_quads(material(), vec![[v(-5.0, 2.0, -5.0), v(5.0, 2.0, -5.0), v(5.0, 2.0, 5.0), v(-5.0, 2.0, 5.0)]]).unwrap();
++        let from_above = hit(&world, v(0.0, 6.0, 0.0), v(0.0, -2.0, 0.0)).expect("a line from above hits the floor");
++        assert!((from_above.geometry.position.y - 2.0).abs() < 1e-4);
++        assert!(from_above.geometry.normal.y > 0.99, "the floor faces up: {:?}", from_above.geometry.normal);
++    }
++
++    #[test]
++    fn a_floor_is_one_sided_so_a_line_from_below_goes_through() {
++        let v = Vector3::new;
++        let world = world_from_quads(material(), vec![[v(-5.0, 2.0, -5.0), v(5.0, 2.0, -5.0), v(5.0, 2.0, 5.0), v(-5.0, 2.0, 5.0)]]).unwrap();
++        assert!(hit(&world, v(0.0, -2.0, 0.0), v(0.0, 6.0, 0.0)).is_none());
++    }
++
++    #[test]
++    fn no_quads_is_no_world() {
++        assert!(world_from_quads(material(), vec![]).is_err());
++    }
++}
+diff --git a/crates/skate-game/src/retail_character.rs b/crates/skate-game/src/retail_character.rs
+index 26368aa..ebb2c56 100644
+--- a/crates/skate-game/src/retail_character.rs
++++ b/crates/skate-game/src/retail_character.rs
+@@ -616,7 +616,7 @@ mod tests {
+         world.insert_resource(crate::config::Config {
+             asset_root: "unused".into(), verification_capture: None,
+             map: None, map_path: None, difficulty: crate::difficulty::Difficulty::Hardcore,
+-            check_assets: false, validate_maps: false, start_paused: false, teleport: None, mute: false,
++            check_assets: false, validate_maps: false, start_paused: false, teleport: None, mute: false, host: None,
+             multiplayer: Default::default(), map_fingerprint: 0,
+         });
+         world.insert_resource(crate::retail_render::RetailScene(false));
+diff --git a/crates/skate-game/src/tests/map_transition.rs b/crates/skate-game/src/tests/map_transition.rs
+index 8c3b849..b552230 100644
+--- a/crates/skate-game/src/tests/map_transition.rs
++++ b/crates/skate-game/src/tests/map_transition.rs
+@@ -27,7 +27,7 @@ fn installed_worlds_prepare_commit_and_retire_without_simulation() {
+     };
+     let mut world = World::new();
+     world.insert_resource(Config { asset_root: root.clone(), verification_capture: None,
+-        map: None, map_path: None, difficulty, check_assets: false, validate_maps: false, start_paused: false, teleport: None, mute: false, multiplayer: Default::default(), map_fingerprint: crate::config::map_fingerprint(None).unwrap() });
++        map: None, map_path: None, difficulty, check_assets: false, validate_maps: false, start_paused: false, teleport: None, mute: false, host: None, multiplayer: Default::default(), map_fingerprint: crate::config::map_fingerprint(None).unwrap() });
+     world.insert_resource(CurrentMap::from_package(None, None));
+     world.insert_resource(graphs);
+     world.insert_resource(physics);

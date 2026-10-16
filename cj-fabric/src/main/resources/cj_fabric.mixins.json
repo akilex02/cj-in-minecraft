@@ -1,0 +1,22 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "dev.cjmc.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "PlayerEntityRendererMixin",
+    "MinecraftClientMixin",
+    "KeyboardInputMixin",
+    "ClientPlayerEntityMixin",
+    "CameraMixin",
+    "InventoryScreenMixin",
+    "ClientWorldMixin",
+    "HeldItemRendererMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "mixins": [
+    "ServerPlayNetworkHandlerMixin"
+  ]
+}

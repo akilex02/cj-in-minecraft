@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "cj_fabric",
+  "version": "${version}",
+  "name": "CJ in Minecraft",
+  "description": "Plays Minecraft as CJ from GTA San Andreas through a local bridge.",
+  "environment": "*",
+  "mixins": [{"config": "cj_fabric.mixins.json", "environment": "client"}],
+  "entrypoints": {
+    "main": ["dev.cjmc.CjMain"],
+    "client": ["dev.cjmc.CjClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.1",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

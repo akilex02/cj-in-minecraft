@@ -1,0 +1,27 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "pattern": [
+    "NfN",
+    "NfN",
+    "rgr"
+  ],
+  "key": {
+    "N": {
+      "item": "minecraft:iron_nugget"
+    },
+    "f": {
+      "item": "minecraft:blaze_powder"
+    },
+    "g": {
+      "item": "minecraft:gunpowder"
+    },
+    "r": {
+      "item": "minecraft:redstone"
+    }
+  },
+  "result": {
+    "id": "cj_fabric:ammo3",
+    "count": 4
+  }
+}

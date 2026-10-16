@@ -1,0 +1,27 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "equipment",
+  "pattern": [
+    "XXG",
+    "NGG",
+    "  R"
+  ],
+  "key": {
+    "G": {
+      "item": "minecraft:gold_block"
+    },
+    "N": {
+      "item": "minecraft:iron_nugget"
+    },
+    "R": {
+      "item": "minecraft:redstone_block"
+    },
+    "X": {
+      "item": "minecraft:diamond_block"
+    }
+  },
+  "result": {
+    "id": "cj_fabric:rocket_launcher",
+    "count": 1
+  }
+}

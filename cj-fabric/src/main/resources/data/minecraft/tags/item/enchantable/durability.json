@@ -1,0 +1,14 @@
+{
+  "replace": false,
+  "values": [
+    "cj_fabric:baseball_bat",
+    "cj_fabric:colt45",
+    "cj_fabric:desert_eagle",
+    "cj_fabric:micro_uzi",
+    "cj_fabric:chromegun",
+    "cj_fabric:ak47",
+    "cj_fabric:m4",
+    "cj_fabric:minigun",
+    "cj_fabric:rocket_launcher"
+  ]
+}

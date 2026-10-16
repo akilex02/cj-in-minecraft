@@ -1,0 +1,34 @@
+# Game files and anything converted from them are never committed
+/GTA San Andreas/
+*.img
+*.dff
+*.txd
+*.ifp
+*.glb
+# the one synthetic (no game data) model the Java tests read
+!/cj-fabric/src/test/resources/mini.glb
+!/cj-fabric/src/test/resources/mini_weapon.glb
+cj-assets/
+# game-derived outputs of tools/convert_assets.py, wherever --out points
+cj_preview.png
+.cj-*.tmp
+
+# Third-party reference (open-source gta-reversed); re-downloadable, not part of this project
+/gta-reversed-master/
+
+# Build output and local state
+/build/
+/.superpowers/
+/cj-fabric/.gradle/
+/cj-fabric/build/
+/cj-fabric/run/
+/cj-fabric/.idea/
+__pycache__/
+*.pyc
+
+# JVM crash dumps
+hs_err_pid*.log
+
+# The weapon icons come from the GTA community: they stay on the user's machine (tools/install_item_icons.py copies them into the mod)
+/weapon-icons/
+/cj-fabric/src/main/resources/assets/cj_fabric/textures/item/gta/

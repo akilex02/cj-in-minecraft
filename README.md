@@ -2,6 +2,9 @@
 
 ![CJ from GTA San Andreas in a Minecraft forest](docs/images/cover.jpg)
 
+## Install Tutorial
+[Here](https://www.youtube.com/watch?v=eZYk-9uRG4E) you can see the process to install the mod.
+
 Carl Johnson from **GTA San Andreas** plays **Minecraft**. GTA runs beside Minecraft and gives CJ his animations, weapons, car and clothes; Minecraft
 draws him in your world, and what you do in Minecraft moves him. **Nothing of GTA is included**: the installer converts CJ from your own copy of the
 game.

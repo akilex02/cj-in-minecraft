@@ -2,12 +2,12 @@
 
 ![CJ from GTA San Andreas in a Minecraft forest](docs/images/cover.jpg)
 
-## Install Tutorial
-[Here](https://www.youtube.com/watch?v=eZYk-9uRG4E) you can see the process to install the mod.
-
 Carl Johnson from **GTA San Andreas** plays **Minecraft**. GTA runs beside Minecraft and gives CJ his animations, weapons, car and clothes; Minecraft
 draws him in your world, and what you do in Minecraft moves him. **Nothing of GTA is included**: the installer converts CJ from your own copy of the
 game.
+
+## How to install Tutorial
+[Here](https://www.youtube.com/watch?v=eZYk-9uRG4E) you can see the process to install the mod.
 
 ## Features
 
@@ -44,10 +44,9 @@ See [BUILDING.md](BUILDING.md).
 - **Electronic Arts / EA Black Box** — Skate 3.
 - **SK8-ENGINE** — the [Skate 3 Rust engine](https://github.com/SK8-ENGINE/skate-3-rust-engine) the skate pack runs (GPL-3.0).
 - **FabricMC** — Fabric Loader and Fabric API.
-- **gta-reversed** — the reverse-engineering project the GTA bridge learned the game's internals from.
+- **gta-reversed** — the [reverse-engineering](https://github.com/gta-reversed/gta-reversed) project the GTA bridge learned the game's internals from.
 - **Silent** (ASI Loader), **CLEO** and **modloader** — what the GTA side stands on.
 - **SA Weapon Icons** ([gtaforums](https://gtaforums.com/topic/997951-sa-weapon-icons/)) — the weapon icons the mod can use (not included).
-- **AkiLeX** — the mod, and the ammo icons.
 - Built with **Claude Code** (Anthropic).
 
 ## Legal
